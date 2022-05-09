@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  TenantName:
+    Type: String
+    Description: Name of the tenant
+Resources:
+  TenantKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub
+        - "${Name} Tenant KMS KEY"
+        - Name: !Ref TenantName
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join 
+                - ""
+                - - "arn:aws:iam::"
+                  - !Ref "AWS::AccountId"
+                  - ":root"
+            Action: "kms:*"
+            Resource: '*'
+          - Sid: Enable CloudWatch Alarm Permission
+            Effect: Allow
+            Principal:
+              Service: 
+                - "cloudwatch.amazonaws.com"
+            Action: 
+                - "kms:Decrypt"
+                - "kms:GenerateDataKey*"
+            Resource: '*'
+          - Sid: Enable CloudWatch Alarm/SNS Permission
+            Effect: Allow
+            Principal:
+              Service: 
+                - "cloudwatch.amazonaws.com"
+                - "sns.amazonaws.com"
+            Action: 
+                - "kms:Decrypt"
+                - "kms:GenerateDataKey*"
+            Resource: '*'
+      MultiRegion: false
+      PendingWindowInDays: 7
+      Tags: 
+        - Key: "Tenant"
+          Value: !Ref TenantName
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub
+        - "${Name}-Topic"
+        - Name: !Ref TenantName
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref BillingAlarmTopic
+  BillingAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub
+        - "${Name}-Topic"
+        - Name: !Ref TenantName
+      Subscription:
+        - Endpoint: !GetAtt BillingAlarmQueue.Arn
+          Protocol: sqs
+      KmsMasterKeyId: !GetAtt TenantKMSKey.Arn
+      Tags: 
+        - Key: "Tenant"
+          Value: !Ref TenantName
+  BillingAlarmQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub
+        - "${Name}-Queue"
+        - Name: !Ref TenantName
+      KmsMasterKeyId: !GetAtt TenantKMSKey.Arn
+      Tags: 
+        - Key: "Tenant"
+          Value: !Ref TenantName
+  BillingAlarmQueueSQSPolicy: 
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      Queues: 
+      - !Ref BillingAlarmQueue
+      PolicyDocument: 
+        Statement: 
+          - Sid: Allow SNS Messages
+            Action: 
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                "aws:SourceArn":
+                  !Ref BillingAlarmTopic
+            Principal:  
+              Service: 
+                - "sns.amazonaws.com"
