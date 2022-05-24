@@ -110,19 +110,21 @@ namespace TenantOnboardingInfra
             var apiGateway = new RestApi(this, restApiName, new RestApiProps()
             {
                 RestApiName = restApiName,
-                DeployOptions = new StageOptions{ // Default logging for all API endpoint dervied from this REST API
-                LoggingLevel= MethodLoggingLevel.ERROR,
-                AccessLogDestination= new LogGroupLogDestination(apiLogGroup),  // Enable Access Logging per AwsSolutions-APIG1
-                AccessLogFormat= AccessLogFormat.JsonWithStandardFields(new JsonWithStandardFieldProps{
-                        Caller= false,
-                        HttpMethod= true,
-                        Ip= true,
-                        Protocol= true,
-                        RequestTime= true,
-                        ResourcePath= true,
-                        ResponseLength= true,
-                        Status= true,
-                        User= true
+                DeployOptions = new StageOptions
+                { // Default logging for all API endpoint dervied from this REST API
+                    LoggingLevel = MethodLoggingLevel.ERROR,
+                    AccessLogDestination = new LogGroupLogDestination(apiLogGroup),  // Enable Access Logging per AwsSolutions-APIG1
+                    AccessLogFormat = AccessLogFormat.JsonWithStandardFields(new JsonWithStandardFieldProps
+                    {
+                        Caller = false,
+                        HttpMethod = true,
+                        Ip = true,
+                        Protocol = true,
+                        RequestTime = true,
+                        ResourcePath = true,
+                        ResponseLength = true,
+                        Status = true,
+                        User = true
                     })
                 }
             });
@@ -141,15 +143,83 @@ namespace TenantOnboardingInfra
             NagSuppressions.AddResourceSuppressions(
               apiGateway, new[]{
                 new NagPackSuppression{ Id= "AwsSolutions-APIG2", Reason= "Backend integration Lambda will perform necessary validation on input parameters according to business logic." },
-                new NagPackSuppression{ Id= "AwsSolutions-APIG3", Reason= "The setup will be vary base on each custom use case, so keep the setup generic for now, a note is added to notify user to review the setting and adjusted before moving to production" },
-                new NagPackSuppression{ Id= "AwsSolutions-APIG3", Reason= "This wildcard permission comes from AWS Managed Lambda policies for cloudwatch/xray, which is required as lambda cannot control cloudwatch log group name in advance and require wildcard permission to create on fly so cannot be replaced" },
-                new NagPackSuppression{ Id= "AwsSolutions-APIG4", Reason= "These API is not configured with authorizer to keep the sample simple and generic. A note is documented in README to notify user to integrate with their business security practices before moving to production."},
-                new NagPackSuppression{ Id= "AwsSolutions-COG4", Reason= "These API is not configured with authorizer to keep the sample simple and generic. A note is documented in README to notify user to integrate with their business security practices before moving to production."},
+                new NagPackSuppression{ Id= "AwsSolutions-APIG3", Reason= "Theese API are not associated with AWS WAFv2 web ACL to keep the setup generic for now, a note is added to notify user to review the setting and adjusted before moving to production" },
+                new NagPackSuppression{ Id= "AwsSolutions-APIG4", Reason= "These API are not configured with authorizer to keep the sample simple and generic. A note is documented in README to notify user to integrate with their business security practices before moving to production."},
+                new NagPackSuppression{ Id= "AwsSolutions-COG4", Reason= "These API are not configured with cognito authorizer to keep the sample simple and generic. A note is documented in README to notify user to integrate with their business security practices before moving to production."},
+                new NagPackSuppression{ Id= "AwsSolutions-IAM4", Reason= "This is generated AWS IAM role for managing log from CDK/API Gateway constructor. The managed policy in question is AmazonAPIGatewayPushToCloudWatchLogs and is the preffered way to setup according to AWS doc https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-logging.html"}
               },
               true
             );
 
             tenantOnboardingFunction.GrantInvoke(apiGatewayIntegrationRole);
+
+
+            // Cloudformation Stack Role
+            // A role used by cloudformation to provision necessary setup
+            // It will be consumable by CloudFormation as a Service
+            Role infraCloudFormationRole = new Role(this, "infra-cloudformation-role", new RoleProps
+            {
+                AssumedBy = new ServicePrincipal("cloudformation.amazonaws.com")
+            });
+
+            // Grant S3 read access for CloudFormation Template file
+            bucket.GrantRead(infraCloudFormationRole);
+
+            // Below provide necessary peviliges for tenant CloudFormation setup, if the customer tenant CloudFormation changed, please adjust with necessary policy change to ensure stack can be created
+            // The reason to not lock down on specific resource is to accomdate resource naming schema in cloudformation, but it is possible to align all naming to lock down previliges to particular naming convention for enhanced security
+            // Provide necessary preilives for KMS interaction (as part of tenant CloudFormation setup)
+            // From https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html
+            // This need to be * on resources as the KMS Key/ARN is random generated
+            infraCloudFormationRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "kms:*"
+                },
+                Resources = new[] { "*" }
+            }));
+
+            // Provide all cloudformation API access to ensure cluster creation success
+            infraCloudFormationRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "cloudformation:*"
+                },
+                Resources = new[] { $"arn:aws:cloudformation:{this.Region}:{this.Account}:stack/tenantcluster-*" }
+            }));
+
+            // For SNS topic creation/deletion
+            // https://docs.aws.amazon.com/sns/latest/dg/sns-using-identity-based-policies.html
+            infraCloudFormationRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "sns:*"
+                },
+                Resources = new[] { $"arn:aws:sns:{this.Region}:{this.Account}:tenantcluster-*" }
+            }));
+
+            // Provide all for Alarm
+            infraCloudFormationRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "cloudwatch:*"
+                },
+                Resources = new[] { $"arn:aws:cloudwatch:{this.Region}:{this.Account}:alarm:tenantcluster-*" }
+            }));
+
+
+            // For SQS
+            infraCloudFormationRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "sqs:*"
+                },
+                Resources = new[] { $"arn:aws:sqs:{this.Region}:{this.Account}:tenantcluster-*" }
+            }));
 
             // Create infraProvisioningFunctionExecutionRole Lambda execution role
             // The role is a different one then API handling lambda to ensure least required previlieges are assigned to each
@@ -162,10 +232,25 @@ namespace TenantOnboardingInfra
             // These polices according to documentation https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html are recommended to use over manually add policy. As Lambda will need to access random cloudwatch/XRAY endpoint base on input requirement
             infraProvisioningFunctionExecutionRole.AddManagedPolicy(ManagedPolicy.FromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"));
 
-            // Add AWS Managed Policies for the lambda to trigger cloudformation creation for each tenant infrastructure
-            // For DEVELOPMENT purpose below mentioned access is used
-            // Best practice is to provide least privilege access
-            infraProvisioningFunctionExecutionRole.AddManagedPolicy(ManagedPolicy.FromAwsManagedPolicyName("AdministratorAccess"));
+            // Grant DynamoDB access
+            tenantTable.GrantStreamRead(infraProvisioningFunctionExecutionRole);
+
+            // Grant S3 read access for CloudFormation Template file
+            bucket.GrantRead(infraProvisioningFunctionExecutionRole);
+
+            // Allow the Lambda role to pass the infraCloudFormationRole role to the cloudformation service 
+            // https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html
+            infraCloudFormationRole.GrantPassRole(infraProvisioningFunctionExecutionRole);
+
+            // Provide all cloudformation API access to ensure cluster creation success
+            infraProvisioningFunctionExecutionRole.AddToPolicy(new PolicyStatement(new PolicyStatementProps
+            {
+                Effect = Effect.ALLOW,
+                Actions = new[] {
+                  "cloudformation:*"
+                },
+                Resources = new[] { $"arn:aws:cloudformation:{this.Region}:{this.Account}:stack/tenantcluster-*" }
+            }));
 
             // Enable adding suppressions to AwsSolutions-IAM4 to notify CDK-NAG that 
             // This role used required AWS Managed Lambda policies. These polices according to documentation https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html are recommended to use over manually add policy. As Lambda will need to access random cloudwatch/XRAY endpoint base on input requirement
@@ -173,8 +258,8 @@ namespace TenantOnboardingInfra
             // The Administrator previliege is already documented in README for user to adjust based on their business case
             NagSuppressions.AddResourceSuppressions(
               infraProvisioningFunctionExecutionRole, new[]{
-                new NagPackSuppression{ Id= "AwsSolutions-IAM4", Reason= "This lambdaExecutionRole used recommended policies from https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html. For the administrator access policy, it is outline in README that user should restrict the access according to their business need." },
-                new NagPackSuppression{ Id= "AwsSolutions-IAM5", Reason= "This wildcard permission comes from AWS Managed Lambda policies for cloudwatch/xray, which is required as lambda cannot control cloudwatch log group name in advance and require wildcard permission to create on fly so cannot be replaced" }
+                new NagPackSuppression{ Id= "AwsSolutions-IAM4", Reason= "This lambdaExecutionRole used recommended policies from https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html." },
+                new NagPackSuppression{ Id= "AwsSolutions-IAM5", Reason= "This wildcard permission comes from AWS Managed Lambda policies for cloudwatch/xray, which is required as lambda cannot control cloudwatch log group name in advance and require wildcard permission to create on fly so cannot be replaced. The Cloudformation wildcard actions are for tenant stack creation, it is limited to tenant-cluster* stack resources to not disrupt other stacks." }
               },
               true
             );
@@ -182,6 +267,7 @@ namespace TenantOnboardingInfra
             // Create a Lambda function - Infra_Provisioning function
             var infraProvisioningFunction = CreateLambdaFunction(infraProvisioningFunctionExecutionRole, infraProvisioningFuncHandler, "src/InfraProvisioningFunction", infraProvisioningFuncName, "InfraProvisioningFunction");
             infraProvisioningFunction.AddEnvironment("TEMPLATE_URL", bucket.UrlForObject(s3ObjectName));
+            infraProvisioningFunction.AddEnvironment("CLOUDFORMATION_SERVICE_ROLE_ARN", infraCloudFormationRole.RoleArn);
 
             // Add an event source for AWS Lambda - Infra_Provisioning function
             EventSourceMapping infraProvisioningMapping = new EventSourceMapping(this, "InfraProvisioningMapping", new EventSourceMappingProps

@@ -8,18 +8,16 @@ This is the code repo for Tenant onboarding in SaaS Architecture for Silo Model 
 SaaS applications can be built with a variety of different architectural models. The `silo model` refers to an architecture where tenants are provided dedicated resources. SaaS applications rely on a frictionless model for introducing new tenants into their environment. This often requires the orchestration of a number of components to successfully provision and configure all the elements needed to create a new tenant. This process, in SaaS architecture, is referred to as tenant on-boarding. On-boarding should be fully automated for every SaaS environment by utilizing infrastructure as code in your on-boarding process. This pattern guides you through a simple example of on-boarding tenant and provisioning a simplified infrastructure for the tenant upon on-boarding.
 
 ## Overall Technology Stack
-### Control-plane Technology Stack
-THE CDK code written in .NET is used to provision the Control Plane infrastructure consisting of the below resources:
+### Control-Plane Technology Stack
+The CDK code written in .NET is used to provision the Control Plane infrastructure consisting of the below resources:
 
 1) API Gateway
-2) Tenant on-boarding Lambda function
-3) Tenant on-boarding DynamoDb [ with DynamoDb streams enabled]
-4) Tenant Infrastructure Lambda function
-5) S3 bucket
 
-The “Tenant On-boarding ”Lambda function is triggered from an API Gateway through the POST Method, which results into storing the received info as a record in the DynamoDB table, "Tenant Onboarding" table, with the tenant details. 
+2) Tenant onboarding Lambda function
+This Lambda is triggered by API Gateway with POST/DELETE method.
+A POST method API request results request info (tenant name, tenant description) to be inserted the DynamoDB table, `Tenant Onboarding` table.
 
-Tenant name in this code sample is also used as part of tenant stack name and resources' name within that stack. This is to make these resources easier to identify. This tenant name must be unique across the setup to avoid conflict/error. 
+Tenant name in this code sample is also used as part of tenant stack name and resources' name within that stack. This is to make these resources easier to identify. This tenant name must be unique across the setup to avoid conflict/error. Detail input validation setup is explained in later IAM Roles section and limitation section.
 
 The storing process to the DynamoDB table will only success if the tenant name is not used in any other record in the table. 
 
@@ -27,59 +25,66 @@ The tenant name in this case is the partition key for this table, as the only pa
 
 If the tenant name is never recorded before, the record will be saved into the table success. 
 
-However, if the tenant name is already used by an existing record in table, the operation will fail and trigger a DynamoDB ConditionalCheckFailedException exception. The exception will be used to return a failure message to user (HTTP BadRequest) that the tenant name is already used.
+However, if the tenant name is already used by an existing record in table, the operation will fail and trigger a DynamoDB `ConditionalCheckFailedException` exception. The exception will be used to return a failure message to user (HTTP `BadRequest`) that the tenant name is already used.
 
-The “Tenant On-boarding ”Lambda function can also be triggered from an API Gateway through the DELETE Method, which results received info to be used as a key to remove the associated record from the DynamoDB table, "Tenant Onboarding" table.
+A DELETE method API request will remove received info (tenant name) from the `Tenant Onboarding` table.
 
-The DynamoDB deletion will success in this case no matter if record is found or not in this sample. 
+The DynamoDB record deletion in this sample will success even if the record does not exist.
 
-However, only the deletion of an record will create a DynamoDB stream. If deletion does not delete anything, a stream will not be created (therefore downstream Lambda will not be triggered).
+If the target record exists and is deleted, it will create a DynamoDB stream record, otherwise no downstream record will be created.
 
+3) Tenant onboarding DynamoDB [ with DynamoDB streams enabled]
+Records the tenant metadata info, and any record save/deletion will send a stream to downstream AWS Lambda, `Tenant Infrastructure` function. 
 
-The "Tenant Onboarding" DynamoDB Table upon a success record save/deletion will send a stream to downstream AWS Lambda, "Tenant Infrastructure" function. 
+4) Tenant Infrastructure Lambda function
+The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream record. If the record is for `INSERT` event, will trigger AWS CloudFormation to create a new tenant infrastructure with the AWS CloudFormation template stored in S3 bucket. A seperate CloudFormation Service role is passed to the stack as part of creation. If the record is for `REMOVE`, will trigger deletion of an existing stack based on the stream record's `Tenant Name` field.
 
+5) S3 bucket
+This is to store the S3 Cloudformation template.
 
-The "Tenant Infrastructure" Lambda function will act based on received DynamoDB stream record. If the record is for "INSERT" event, will trigger AWS CloudFormation to create a new tenant infrastructure with the AWS CloudFormation template stored in S3 bucket. If the record is for "REMOVE", will trigger deletion of an existing stack based on the stream record's Tenant Name field.
+6) IAM Roles for each Lambda functions and CloudFormation Service Roles
+Each Lambda function has its unique IAM with least privileges to achieve its task: for example, Tenant Onboarding Lambda can read/write access to DynamoDB and Tenant Infrastructure Lambda can only read the DynamoDB stream.
+
+A custom CloudFormation service role is created for tenant stack provision.  This service role contains additional privileges for CloudFormation stack provision (i.e. KMS key etc.). The separation of roles between Lambda and CloudFormation to avoid all privileges on a single role (Infrastructure Lambda Role).
+
+For privilege's with powerful actions (i.e. allow to create/delete CloudFormation stacks) are locked down to only allowed on resources start with `tenantcluster-` (one exception is KMS, due to its resource naming convention). The ingest tenant name from API will prepended with `tenantcluster-` along with other validation check (alphanumeric with dash only, and less than 30 characters to limit to fit into most AWS resource naming). This ensure that tenant name will not accidently result in disruption of core infrastructure stacks/resources.
 
 ### Tenant Technology stack
 A simple CloudFormation Template is stored in the S3 bucket.
 
-This template provisions tenant specific  KMS Key, CloudWatch Alarm, SNS topic, SQS queue, and SQS policy.
+This template provisions tenant specific KMS Key, CloudWatch Alarm, SNS topic, SQS queue, and SQS policy.
 
-The KMS key is used for data encryption by SNS and SQS for their messages. . The AWS Key Management Service (AWS KMS) for each tenant opens to Amazon CloudWatch/Amazon Simple Notification Service (SNS) services in the account to consume per key management doc. Security Practices (AwsSolutions-SNS2 and AwsSolutions-SQS2) recommend SNS and SQS to be setup with encryption. However, CloudWatch Alarm cannot work with SNS with AWS Managed Key, so KMS CMK must be used in this case.
+The KMS key is used for data encryption by SNS and SQS for their messages. The AWS Key Management Service (AWS KMS) for each tenant opens to Amazon CloudWatch/Amazon Simple Notification Service (SNS) services in the account to consume per key management doc. Security Practices (AwsSolutions-SNS2 and AwsSolutions-SQS2) recommend SNS and SQS to be setup with encryption. However, CloudWatch Alarm cannot work with SNS with AWS Managed Key, so KMS CMK must be used in this case.
 
 The SQS policy is used on SQS to allow the created SNS to deliver message to it, otherwise the access will be denied per doc (Step 2 section).
 
-This is a basic template which creates billing alerts using CloudWatch Alarm and notify if the threshold is breached. The SQS queue receives a message from SNS . The message from the SQS queue will then be used by the customer for further processing *(since we are creating a billing alarm it is recommended to deploy the stack in N.Virginia ( us-east-1))
+This is a basic template which creates billing alerts using CloudWatch Alarm and notify if the threshold is breached. The SQS queue receives a message from SNS. The message from the SQS queue will then be used by the customer for further processing.
 
 ![architecture](images/CDKArchitecture.drawio.png)
 
 ## Overall Flow
-Tenant Stack Creation Flow
-
+### Tenant Stack Creation Flow
 1. User sends a POST API request with new tenant payload (tenant name, tenant description) in JSON to REST API hosted by Amazon API Gateway, which will process the request and forward to backend AWS Lambda, Tenant Onboarding function. In this sample, there is no authorization/authentication. But in a production setup, this API will be integrated with the SaaS infrastructure security system.
-2. The Tenant Onboarding function will verify the request and then attempt to store the tenant record (tenant name, generated tenant UUID, tenant description) into an Amazon DynamoDB table, Tenant Onboarding table. 
-3. Once the DynamoDB stores the record, will then pass a DynamoDB stream to trigger downstream AWS Lambda, Tenant Infrastructure Function.
-4. The "Tenant Infrastructure" Lambda function will act based on received DynamoDB stream. If the stream is for "INSERT" event, will use the stream's NewImage (latest update record, Tenant Name field) section to trigger AWS CloudFormation to create a new tenant infrastructure with the AWS CloudFormation template stored in S3 bucket and parameter specific to the tenant (in this case, it is Tenant Name). 
+2. The `Tenant Onboarding` function will verify the request and then attempt to store the tenant record (tenant name, generated tenant UUID, tenant description) into an Amazon DynamoDB table, the `Tenant Onboarding` table. 
+3. Once the DynamoDB stores the record, will then pass a DynamoDB stream to trigger a downstream AWS Lambda, the `Tenant Infrastructure` Function.
+4. The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream. If the stream is for `INSERT` event, will use the stream's `NewImage` (latest update record, Tenant Name field) section to trigger AWS CloudFormation to create a new tenant infrastructure with the AWS CloudFormation template stored in S3 bucket, parameter specific to the tenant (in this case, it is Tenant Name), and the custom CloudFormation Service role.
 5. AWS CloudFormation will create the tenant infrastructure based on the CloudFormation template and input parameters
 6. Each tenant infrastructure setup will have a CloudWatch Alarm, Billing Alarm, which will be triggered when tenant infrastructure cost is above 100 dollars (in this sample). Once an alarm is triggered, will access AWS KMS for encryption key to send message to downstream SNS topic.
 7. SNS Topic upon received the message will access AWS KMS for encryption key and place the message within downstream SQS queue.
 8. SQS queue in this case can be integrated with other system to perform action based on received message. In this sample, there is no action taken to keep the code generic and simple.
 
-
-Tenant Stack Deletion Flow
-
+### Tenant Stack Deletion Flow
 1. User sends a DELETE API request with new tenant payload (tenant name, tenant description) in JSON to REST API hosted by Amazon API Gateway, which will process the request and forward to Tenant Onboarding function. In this sample, there is no authorization/authentication. But in a production setup, this API will be integrated with the SaaS infrastructure security system.
-2. The Tenant Onboarding function will verify the request and then attempt to delete the tenant record (tenant name) from the Tenant Onboarding table. 
-3. Once the DynamoDB delete the record success (the record exists in the table and is deleted), will then pass a DynamoDB stream to trigger downstream AWS Lambda, Tenant Infrastructure Function.
-4. The "Tenant Infrastructure" Lambda function will act based on received DynamoDB stream record. If the stream is for "REMOVE" event, will use the record's OldImage (record info, Tenant Name field, before the latest change, which is delete) section to trigger deletion of an existing stack based on the stream record's Tenant Name field.
+2. The `Tenant Onboarding` function will verify the request and then attempt to delete the tenant record (tenant name) from the Tenant Onboarding table. 
+3. Once the DynamoDB delete the record success (the record exists in the table and is deleted), will then pass a DynamoDB stream to trigger a downstream AWS Lambda, the `Tenant Infrastructure` Function.
+4. The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream record. If the stream is for `REMOVE` event, will use the record's `OldImage` (record info, Tenant Name field, before the latest change, which is delete) section to trigger deletion of an existing stack based on the stream record's Tenant Name field.
 5. AWS CloudFormation will delete the target tenant stack according to input
 
 ## Prerequisites 
 1. An Active AWS Account. (See [AWS Account](https://aws.amazon.com/account/) Page.)
 2. AWS CDK ToolKit Installed. (See [AWS CDK Toolkit](https://docs.aws.amazon.com/cdk/v2/guide/cli.html) in the AWS CDK documentation.) 
-3. User with sufficient access to create AWS resources for this pattern.(See IAM role in [AWS IAM Roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html) Documentation.)
-4. User should have programmatic access keys.(See [IAM user and Access](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html) in the AWS IAM documentation.)
+3. User with sufficient access to create AWS resources for this pattern. (See IAM role in [AWS IAM Roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html) Documentation.)
+4. User should have programmatic access keys. (See [IAM user and Access](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html) in the AWS IAM documentation.)
 5. Amazon command line interface (AWS CLI). (See [Installing, updating, and uninstalling the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) in the AWS CLI documentation.)
 6. [Download](https://visualstudio.microsoft.com/downloads/) and install Visual Studio 2022 OR [Download](https://code.visualstudio.com/download) and install Visual Studio Code.
 7. Setup the AWS Toolkit for Visual Studio. Instructions are [available here](https://docs.aws.amazon.com/toolkit-for-visual-studio/latest/user-guide/setup.html).
@@ -97,11 +102,11 @@ The sample code is acting as a high-level implementation, following should be ad
 
 4. This sample setups [Amazon Simple Notification Service (SNS)](https://aws.amazon.com/sns/)/[Amazon Simple Queue Service (SQS)](https://aws.amazon.com/sqs/) setup per tenant infrastructure only has a minimum setup. The [AWS Key Management Service (AWS KMS)](https://aws.amazon.com/kms/) for each tenant opens to [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/)/Amazon Simple Notification Service (SNS) services in the account to consume per [Key management](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-key-management.html#compatibility-with-aws-services). The setup is only act as a place holder sample. Please adjust with business use case as needed.
 
-5. The entire setup, which includes but not limits to API endpoints/backend tenant [AWS CloudFormation](https://aws.amazon.com/cloudformation/) provision and deletion, only covers the basic happy path case. Please evaluate and updated the setup with necessary retry logics, additional error handling logics, and security logics based on business need.
+5. The entire setup, which includes but not limits to API endpoints/backend tenant [AWS CloudFormation](https://aws.amazon.com/cloudformation/) provision and deletion, only covers the basic happy path case. The backend tenant AWS CloudFormation stack for each tenant infrastructure is created with `rollback` disabled to preserve successfully created resources for operation team debugging purpose during stack failure scenarios. This setup is more useful if the created stack involves services such as containers etc so require additional investigations/logs on top of standard AWS CloudFormation logs. Please evaluate and updated the setup with necessary retry logics, additional error handling logics, and security logics based on business need.
 
-6. The backend Lambda role currently use `AdministratorAccess` AWS Managed policy in order to provision the AWS CloudFormation stack for each tenant infrastructure. This is for development only. For production use case, please evaluate this setting and provide only required access to this Lambda role (i.e. limit the creation access only to required infrastructure within each tenant AWS CloudFormation stack).
+6. The tenant CloudFormation stack is created with a CloudFormation Service Role `infra-cloudformation-role` with wildcard on actions (i.e. `sns*` and `sqs*`) but with locked resources (locked down to `tenant-cluster` prefix). For production use case, please evaluate this setting and provide only required access to this service role. The Infrastructure Provision Lambda also has similar setup: wildcard on actions for `cloudformation*` to provision Cloudformation stack but with locked resources (locked down to `tenant-cluster` prefix).
 
-7. The sample code is tested with up to date cdk-nag [cdk-nag](https://github.com/cdklabs/cdk-nag) to check for policies at time of the written. It is possible there maybe new policies enforced in future. These new policies may require users to manual modify the stack per recommendation before the stack can be deployed. Please also review the existing code to ensure it aligns with users' business requirement.
+7. The sample code is tested with up to date [cdk-nag](https://github.com/cdklabs/cdk-nag) policies at the time of this written. It is possible there maybe new policies enforced in future. These new policies may require users to manual modify the stack per recommendation before the stack can be deployed. Please also review the existing code to ensure it aligns with users' business requirement.
 
 8. The stack deletion process will not clean up CloudWatch Logs (Log Groups/Logs) generated by the stack. So will require users to manually clean up either through AWS CloudWatch console/API.
 
@@ -138,7 +143,7 @@ After the provision is completed, a message like below will respond back if the 
 ```
 {  "message": "A new tenant added - 5/4/2022 7:11:30 AM" }
 ```
-Please check the AWS CloudFormation console, a stack with above tenant name (i.e. `Tenant123`) is created.
+Please check the AWS CloudFormation console, a stack with prefix `tenantcluster-` and the above tenant name (i.e. `Tenant123`) will be created (`tenantcluster-tenant123`).
 
 3. Test tenant infrastructure
 From AWS CloudFormation console -> Click on the newly created tenant cluster -> Resources -> Note the alarm resource name
@@ -150,7 +155,7 @@ aws cloudwatch set-alarm-state --alarm-name <alarm resource name> --state-value 
 
 Example
 ```
-aws cloudwatch set-alarm-state --alarm-name tenant123-Topic --state-value ALARM --state-reason 'Test setup'
+aws cloudwatch set-alarm-state --alarm-name tenantcluster-tenant123-alarm --state-value ALARM --state-reason 'Test setup'
 ```
 
 From AWS CloudFormation console -> Click on the newly created tenant cluster -> Resources -> Note the SQS resource name
@@ -183,7 +188,7 @@ In the Git repo, open a new terminal with AWS Credential configured and point to
 ```
 cdk destroy
 ```     
-Confirm to delete the stack to proceed with the deletion
+Confirm the stack deletion prompt to delete the stack
 
 6. [Optional] Clean up [AWS CloudWatch Log](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html)
 The stack deletion process will not clean up CloudWatch Logs (Log Groups/Logs) generated by the stack. So will require user to manually clean up either through AWS CloudWatch console/API.

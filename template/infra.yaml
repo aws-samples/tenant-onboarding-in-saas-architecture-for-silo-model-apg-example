@@ -8,7 +8,7 @@ Resources:
     Type: AWS::KMS::Key
     Properties:
       Description: !Sub
-        - "${Name} Tenant KMS KEY"
+        - "${Name}-kms-key"
         - Name: !Ref TenantName
       Enabled: true
       EnableKeyRotation: true
@@ -54,7 +54,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub
-        - "${Name}-Topic"
+        - "${Name}-alarm"
         - Name: !Ref TenantName
       Namespace: AWS/Billing
       MetricName: EstimatedCharges
@@ -72,7 +72,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub
-        - "${Name}-Topic"
+        - "${Name}-sns"
         - Name: !Ref TenantName
       Subscription:
         - Endpoint: !GetAtt BillingAlarmQueue.Arn
@@ -85,7 +85,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub
-        - "${Name}-Queue"
+        - "${Name}-sqs"
         - Name: !Ref TenantName
       KmsMasterKeyId: !GetAtt TenantKMSKey.Arn
       Tags: 

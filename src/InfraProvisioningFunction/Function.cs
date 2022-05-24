@@ -1,5 +1,6 @@
 using Amazon.CloudFormation;
 using Amazon.CloudFormation.Model;
+using Amazon.Lambda;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.DynamoDBEvents;
 using System.Threading.Tasks;
@@ -12,10 +13,14 @@ namespace InfraProvisioningFunction;
 
 public class Function
 {
-    private string templateURL;
     public async Task<string> FunctionHandler(DynamoDBEvent dynamoEvent, ILambdaContext context)
     {
-        templateURL = System.Environment.GetEnvironmentVariable("TEMPLATE_URL");
+        // Cannot execute as the template url is null, error out
+        // ?? is the null-coalescing operator
+        // https://docs.microsoft.com/en-in/dotnet/csharp/language-reference/operators/null-coalescing-operator
+        string templateURL = System.Environment.GetEnvironmentVariable("TEMPLATE_URL") ?? throw new ArgumentException("TEMPLATE_URL is not setup, fail the execution");
+        string cloudformationServiceRoleARN = System.Environment.GetEnvironmentVariable("CLOUDFORMATION_SERVICE_ROLE_ARN") ?? throw new ArgumentException("CLOUDFORMATION_SERVICE_ROLE_ARN is not setup, fail the execution");
+
         context.Logger.LogLine($"Beginning to process {dynamoEvent.Records.Count} records...");
         AmazonCloudFormationClient client = new AmazonCloudFormationClient();
 
@@ -25,22 +30,43 @@ public class Function
             context.Logger.LogLine($"Event Name: {record.EventName}");
             if (record.EventName.Value.Contains("INSERT"))
             {
-                Amazon.DynamoDBv2.Model.AttributeValue tenantID = new Amazon.DynamoDBv2.Model.AttributeValue();
-                Amazon.DynamoDBv2.Model.AttributeValue tenantName = new Amazon.DynamoDBv2.Model.AttributeValue();
-                record.Dynamodb.NewImage.TryGetValue("TenantId", out tenantID);
-                record.Dynamodb.NewImage.TryGetValue("TenantName", out tenantName);
-                context.Logger.LogLine($"CREATION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
+                // Need to notify compiler that tenantID/tenantName (by adding ? in the declaration) is not possible to be null
+                // The API TryGetValue may return null only if false, which will be catched by below if statement
+                // So it is safe to ignore
+                Amazon.DynamoDBv2.Model.AttributeValue? tenantID = new Amazon.DynamoDBv2.Model.AttributeValue();
+                Amazon.DynamoDBv2.Model.AttributeValue? tenantName = new Amazon.DynamoDBv2.Model.AttributeValue();
+                if (record.Dynamodb.NewImage.TryGetValue("TenantId", out tenantID) &&
+                    record.Dynamodb.NewImage.TryGetValue("TenantName", out tenantName))
+                {
+                    context.Logger.LogLine($"CREATION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
 
-                await CreateCfnStack(client, tenantName.S);
-            }else if(record.EventName.Value.Contains("REMOVE")) {
-                Amazon.DynamoDBv2.Model.AttributeValue tenantID = new Amazon.DynamoDBv2.Model.AttributeValue();
-                Amazon.DynamoDBv2.Model.AttributeValue tenantName = new Amazon.DynamoDBv2.Model.AttributeValue();
+                    await CreateCfnStack(client, tenantName.S);
+                }
+                else
+                {
+                    throw new ArgumentException("Fail to analyze the DynamDB Stream NewImage tenantId/tenantName, fail the creation execution");
+                }
+            }
+            else if (record.EventName.Value.Contains("REMOVE"))
+            {
+                // Need to notify compiler that tenantID/tenantName (by adding ? in the declaration) is not possible to be null
+                // The API TryGetValue may return null only if false, which will be catched by below if statement
+                // So it is safe to ignore
+                Amazon.DynamoDBv2.Model.AttributeValue? tenantID = new Amazon.DynamoDBv2.Model.AttributeValue();
+                Amazon.DynamoDBv2.Model.AttributeValue? tenantName = new Amazon.DynamoDBv2.Model.AttributeValue();
                 // Need to use OldImage, as there is no new modification but a removal (no NewImage)
-                record.Dynamodb.OldImage.TryGetValue("TenantId", out tenantID);
-                record.Dynamodb.OldImage.TryGetValue("TenantName", out tenantName);
+                if (record.Dynamodb.OldImage.TryGetValue("TenantId", out tenantID) &&
+                    record.Dynamodb.OldImage.TryGetValue("TenantName", out tenantName))
+                {
 
-                context.Logger.LogLine($"DELETION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
-                await DeleteCfnStack(client, tenantName.S);
+                    context.Logger.LogLine($"DELETION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
+                    await DeleteCfnStack(client, tenantName.S);
+                }
+                else
+                {
+                    throw new ArgumentException("Fail to analyze the DynamDB Stream OldImage tenantId/tenantName, fail the deletion execution");
+                }
+
             }
         }
 
@@ -52,6 +78,7 @@ public class Function
                 StackName = tenantName,
                 DisableRollback = true,
                 TemplateURL = templateURL,
+                RoleARN = cloudformationServiceRoleARN,
                 Parameters = new System.Collections.Generic.List<Parameter>
                 {
                     new Parameter()
@@ -64,16 +91,17 @@ public class Function
             };
             try
             {
-                await client.CreateStackAsync(stackRequest);
+                return await client.CreateStackAsync(stackRequest);
             }
-            catch (Exception e) {
+            catch (Exception e)
+            {
                 context.Logger.LogLine("I am here source of error " + e.Message);
+                throw new ArgumentException("CloudFormation stack creation fail due to " + e.Message);
             }
-            return null;
         }
 
 
-        async Task<CreateStackResponse> DeleteCfnStack(AmazonCloudFormationClient client, string tenantName)
+        async Task<DeleteStackResponse> DeleteCfnStack(AmazonCloudFormationClient client, string tenantName)
         {
 
             DeleteStackRequest stackRequest = new DeleteStackRequest()
@@ -82,16 +110,17 @@ public class Function
             };
             try
             {
-                await client.DeleteStackAsync(stackRequest);
+                return await client.DeleteStackAsync(stackRequest);
             }
-            catch (Exception e) {
+            catch (Exception e)
+            {
                 context.Logger.LogLine("I am here source of error " + e.Message);
+                throw new ArgumentException("CloudFormation stack creation fail due to " + e.Message);
             }
-            return null;
         }
 
         context.Logger.LogLine("Stream processing complete.");
-        return templateURL;
+        return "Complete Stack Operation";
     }
 
 }

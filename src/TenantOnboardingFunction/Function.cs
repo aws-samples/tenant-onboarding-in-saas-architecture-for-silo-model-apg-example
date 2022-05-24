@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 
 // Assembly attribute to enable the Lambda function's JSON input to be converted into a .NET class.
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
@@ -16,6 +17,8 @@ namespace TenantOnboardingFunction;
 
 public class Function
 {
+    private string TENANT_CLUSTER_PREFIX = "tenantcluster-";
+
     public async Task<APIGatewayProxyResponse> FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
     {
         if (request.HttpMethod == "POST" && request.Resource == "/tenant")
@@ -52,21 +55,34 @@ public class Function
                 // If parse fail, will trigger catch
                 JObject body = JObject.Parse(requestBody);
 
-                JToken descriptionToken = body["Description"];
-                JToken nameToken = body["Name"];
+                // Use regex to check to ensure description only contain alpha numeric and dash
+                // To fulfill cloudformation and most AWS resource naming convention
+                Regex regex = new Regex(@"^[a-zA-Z0-9\s\-]*$");
 
-                // Check for valid input, if not valid (name and description not present, and/or name is empty), return bad request code
-                if (descriptionToken == null || nameToken == null || nameToken.ToString().Trim() == String.Empty)
+                // Check for valid input, if not valid, return bad request code
+                // description can be empty (whitespace), but field need to present
+                // nameneed to be present and not empty (no whitespace)
+                if (body["Description"] is null || body["Name"] is null || String.IsNullOrWhiteSpace(body["Name"]!.ToString()))
                 {
                     // Create a new JSON to handle the body (as the response is application/json)
                     responseBody.Add("message", "Invalid input");
 
                 }
+                else if (body["Name"]!.ToString().Length > 30)
+                {
+                    responseBody.Add("message", "Invalid input as tenant name length need to be less than 30.");
+                }
+                else if (!regex.IsMatch(body["Name"]!.ToString()))
+                {
+                    responseBody.Add("message", "Invalid input as tenant name must be alpha numeric and dash only.");
+                }
                 else
                 {
-                    description = descriptionToken.ToString();
+                    // Clean up the description
+                    description = body["Description"]!.ToString().Trim();
                     // Force the tenant name to lower case for case insenstivie tenant name (avoid different tenant name case to be present as different tenant)
-                    name = nameToken.ToString().ToLower().Trim();
+                    // Also force to append prefix to ensure the tenant name in system will not duplicate with other in system cluster
+                    name = TENANT_CLUSTER_PREFIX + body["Name"]!.ToString().ToLower().Trim();
                 }
 
             }
@@ -78,7 +94,7 @@ public class Function
             }
 
             // If there is message, it indicate parsing error, so return that error
-            if (responseBody["message"] != null)
+            if (responseBody["message"] is not null)
             {
                 context.Logger.LogLine($"Error parsing input where name and/or description are invalid with request body: {requestBody}");
 
@@ -167,7 +183,11 @@ public class Function
             JObject responseBody = new JObject();
             string tenantName = pathParameters["tenantName"];
 
-            if (tenantName == null || tenantName.Trim() == String.Empty)
+            // Use regex to check to ensure description only contain alpha numeric and dash
+            // To fulfill cloudformation and most AWS resource naming convention
+            Regex regex = new Regex(@"^[a-zA-Z0-9\s\-]*$");
+
+            if (String.IsNullOrWhiteSpace(tenantName) || tenantName.Length > 30 || !regex.IsMatch(tenantName))
             {
                 responseBody.Add("message", "The input tenant name is invalid");
                 return new APIGatewayProxyResponse()
@@ -179,7 +199,7 @@ public class Function
             }
 
             // Force the tenant name to lower case to align with provision case
-            tenantName = tenantName.ToLower().Trim();
+            tenantName = TENANT_CLUSTER_PREFIX + tenantName.ToLower().Trim();
 
             AmazonDynamoDBClient client = new AmazonDynamoDBClient();
 
