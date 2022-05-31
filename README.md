@@ -112,6 +112,8 @@ The sample code is acting as a high-level implementation, following should be ad
 
 9. The code relies on CDK to generate random suffix instead of relying on static assigned physical name for most created resources. This setup is to ensure these resources are unique and not conflict with other stack as per [CDK Doc (under Physical names section)](https://docs.aws.amazon.com/cdk/v2/guide/resources.html). Please adjust per business requirement.
 
+10. This sample code's docker build uses `--platform=linux/amd64` to force `linux/amd64` based images. This is to ensure final image artifacts will be suitable for Lambda, which is default to `x86-64` architecture. If need to change the target Lambda architecture, please ensure to change both docker files and CDK codes. More detail can be found in this [doc](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-to-arm-based-aws-graviton2-processors/).
+
 ## Deploy / Clean up
 Deploy this stack to your default AWS account/region (assume [AWS CDK](https://aws.amazon.com/cdk/) 2.1.0 or later installed)
 
