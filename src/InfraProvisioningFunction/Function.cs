@@ -38,13 +38,13 @@ public class Function
                 if (record.Dynamodb.NewImage.TryGetValue("TenantId", out tenantID) &&
                     record.Dynamodb.NewImage.TryGetValue("TenantName", out tenantName))
                 {
-                    context.Logger.LogLine($"CREATION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
+                    context.Logger.LogLine($"Creation command received for TenantId: {tenantID.S}, TenantName: {tenantName.S}");
 
                     await CreateCfnStack(client, tenantName.S);
                 }
                 else
                 {
-                    throw new ArgumentException("Fail to analyze the DynamDB Stream NewImage tenantId/tenantName, fail the creation execution");
+                    throw new ArgumentException("Fail to analyze the DynamDB Stream NewImage TenantId/TenantName, fail the creation execution");
                 }
             }
             else if (record.EventName.Value.Contains("REMOVE"))
@@ -59,12 +59,12 @@ public class Function
                     record.Dynamodb.OldImage.TryGetValue("TenantName", out tenantName))
                 {
 
-                    context.Logger.LogLine($"DELETION COMMAND RECEIVED FOR TENANTID: {tenantID.S}, TENANTNAME: {tenantName.S}");
+                    context.Logger.LogLine($"Deletion command received for TenantId: {tenantID.S}, TenantName: {tenantName.S}");
                     await DeleteCfnStack(client, tenantName.S);
                 }
                 else
                 {
-                    throw new ArgumentException("Fail to analyze the DynamDB Stream OldImage tenantId/tenantName, fail the deletion execution");
+                    throw new ArgumentException("Fail to analyze the DynamDB Stream OldImage TenantId/TenantName, fail the deletion execution");
                 }
 
             }
@@ -95,7 +95,7 @@ public class Function
             }
             catch (Exception e)
             {
-                context.Logger.LogLine("I am here source of error " + e.Message);
+                context.Logger.LogLine("Source of error " + e.Message);
                 throw new ArgumentException("CloudFormation stack creation fail due to " + e.Message);
             }
         }
@@ -114,7 +114,7 @@ public class Function
             }
             catch (Exception e)
             {
-                context.Logger.LogLine("I am here source of error " + e.Message);
+                context.Logger.LogLine("Source of error " + e.Message);
                 throw new ArgumentException("CloudFormation stack creation fail due to " + e.Message);
             }
         }

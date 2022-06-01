@@ -64,21 +64,22 @@ This is a basic template which creates billing alerts using CloudWatch Alarm and
 
 ## Overall Flow
 ### Tenant Stack Creation Flow
-1. User sends a POST API request with new tenant payload (tenant name, tenant description) in JSON to REST API hosted by Amazon API Gateway, which will process the request and forward to backend AWS Lambda, Tenant Onboarding function. In this sample, there is no authorization/authentication. But in a production setup, this API will be integrated with the SaaS infrastructure security system.
+1. User sends a POST API request with new tenant payload (tenant name, tenant description) in JSON to REST API hosted by Amazon API Gateway. The API Gateway will process the request and forward to back-end AWS Lambda, Tenant On-boarding function. In this sample, there is no authorization/authentication. But in a production setup, this API will be integrated with the SaaS infrastructure security system.
 2. The `Tenant Onboarding` function will verify the request and then attempt to store the tenant record (tenant name, generated tenant UUID, tenant description) into an Amazon DynamoDB table, the `Tenant Onboarding` table. 
 3. Once the DynamoDB stores the record, will then pass a DynamoDB stream to trigger a downstream AWS Lambda, the `Tenant Infrastructure` Function.
-4. The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream. If the stream is for `INSERT` event, will use the stream's `NewImage` (latest update record, Tenant Name field) section to trigger AWS CloudFormation to create a new tenant infrastructure with the AWS CloudFormation template stored in S3 bucket, parameter specific to the tenant (in this case, it is Tenant Name), and the custom CloudFormation Service role.
-5. AWS CloudFormation will create the tenant infrastructure based on the CloudFormation template and input parameters
-6. Each tenant infrastructure setup will have a CloudWatch Alarm, Billing Alarm, which will be triggered when tenant infrastructure cost is above 100 dollars (in this sample). Once an alarm is triggered, will access AWS KMS for encryption key to send message to downstream SNS topic.
-7. SNS Topic upon received the message will access AWS KMS for encryption key and place the message within downstream SQS queue.
-8. SQS queue in this case can be integrated with other system to perform action based on received message. In this sample, there is no action taken to keep the code generic and simple.
+4. The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream. If the stream is for `INSERT` event, it will use the stream's `NewImage` (latest update record, Tenant Name field) section to trigger AWS CloudFormation to create a new tenant infrastructure. The AWS CloudFormation template is in S3 bucket and requires parameter specific to the tenant (in this case, it is the `Tenant Name`). 
+5. AWS CloudFormation will create the tenant infrastructure based on the CloudFormation template and input parameters.
+6. Each tenant infrastructure setup will have a CloudWatch Alarm, `Billing Alarm`. An alarm event will become a message to SNS topic, which is encrypted by the tenant's AWS KMS key.
+7. SNS Topic will forward received alarm message to SQS queue, which is encrypted by the tenant's AWS KMS for encryption key.
+8. Other systems can be integrated with SQS to perform actions based on messages in queue. In this sample, incoming messages will remain in queue and require manual deletion to keep the code generic and simple.
+
 
 ### Tenant Stack Deletion Flow
 1. User sends a DELETE API request with new tenant payload (tenant name, tenant description) in JSON to REST API hosted by Amazon API Gateway, which will process the request and forward to Tenant Onboarding function. In this sample, there is no authorization/authentication. But in a production setup, this API will be integrated with the SaaS infrastructure security system.
 2. The `Tenant Onboarding` function will verify the request and then attempt to delete the tenant record (tenant name) from the Tenant Onboarding table. 
-3. Once the DynamoDB delete the record success (the record exists in the table and is deleted), will then pass a DynamoDB stream to trigger a downstream AWS Lambda, the `Tenant Infrastructure` Function.
-4. The `Tenant Infrastructure` Lambda function will act based on received DynamoDB stream record. If the stream is for `REMOVE` event, will use the record's `OldImage` (record info, Tenant Name field, before the latest change, which is delete) section to trigger deletion of an existing stack based on the stream record's Tenant Name field.
-5. AWS CloudFormation will delete the target tenant stack according to input
+3. Once the DynamoDB deletes the record successfully (the record exists in the table and is deleted), a DynamoDB stream to triggers downstream AWS Lambda, Tenant Infrastructure Function.
+4. The `Tenant Infrastructure` Lambda function acts based on received DynamoDB stream record. If the stream is for REMOVE event, it uses the record's `OldImage` (record info, `Tenant Name` field, before the latest change, which is delete) section to trigger deletion of a stack based on that record info.
+5. AWS CloudFormation deletes the target tenant stack according to input.
 
 ## Prerequisites 
 1. An Active AWS Account. (See [AWS Account](https://aws.amazon.com/account/) Page.)
@@ -113,6 +114,8 @@ The sample code is acting as a high-level implementation, following should be ad
 9. The code relies on CDK to generate random suffix instead of relying on static assigned physical name for most created resources. This setup is to ensure these resources are unique and not conflict with other stack as per [CDK Doc (under Physical names section)](https://docs.aws.amazon.com/cdk/v2/guide/resources.html). Please adjust per business requirement.
 
 10. This sample code's docker build uses `--platform=linux/amd64` to force `linux/amd64` based images. This is to ensure final image artifacts will be suitable for Lambda, which is default to `x86-64` architecture. If need to change the target Lambda architecture, please ensure to change both docker files and CDK codes. More detail can be found in this [doc](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-to-arm-based-aws-graviton2-processors/).
+
+11. This sample code packages .NET Lambda artifacts into docker based images and execute with [Lambda provided Container Image runtime](https://docs.aws.amazon.com/lambda/latest/dg/csharp-image.html). The container image runtime has advantages for standard transfer/store mechanisms (i.e. container registry) and more accurate local test environments (through container image). It is possible to switch the project to use [Lambda provided .NET runtimes](https://docs.aws.amazon.com/lambda/latest/dg/lambda-csharp.html) to reduce the package/build time of docker images but will then need to setup transfer/store mechanisms and ensure local setup matches Lambda setup. Please adjust the code to align with users' business requirement.
 
 ## Deploy / Clean up
 Deploy this stack to your default AWS account/region (assume [AWS CDK](https://aws.amazon.com/cdk/) 2.1.0 or later installed)
